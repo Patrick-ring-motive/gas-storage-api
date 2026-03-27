@@ -48,241 +48,235 @@
 
 const StoragePolyfill = (() => {
 
-// ─── Constants ─────────────────────────────────────────────────────────────
+  // ─── Constants ─────────────────────────────────────────────────────────────
 
-const SESSION_PREFIX   = 'ss__';
-const LOCAL_PREFIX     = 'ls__';
-const TTL              = 21600;   // 6 hours (CacheService max)
-const DEBOUNCE_WINDOW  = 3600;    // 1 hour in seconds
-const TRIGGER_ID_KEY   = 'ls__trigger_id__';
-const LAST_REFRESH_KEY = 'ls__last_refresh__';
-const REFRESH_FN       = 'refreshLocalStorageCache';
+  const SESSION_PREFIX = 'ss__';
+  const LOCAL_PREFIX = 'ls__';
+  const TTL = 21600; // 6 hours (CacheService max)
+  const DEBOUNCE_WINDOW = 3600; // 1 hour in seconds
+  const TRIGGER_ID_KEY = 'ls__trigger_id__';
+  const LAST_REFRESH_KEY = 'ls__last_refresh__';
+  const REFRESH_FN = 'refreshLocalStorageCache';
 
-// ─── Memoized cache handle ─────────────────────────────────────────────────
+  // ─── Memoized cache handle ─────────────────────────────────────────────────
 
-let _cache = null;
-const getCache = () => {
-if (!_cache) _cache = CacheService.getScriptCache();
-return _cache;
-};
+  let _cache = null;
+  const getCache = () => {
+    if (!_cache) _cache = CacheService.getScriptCache();
+    return _cache;
+  };
 
-// ─── Shared refresh logic ──────────────────────────────────────────────────
+  // ─── Shared refresh logic ──────────────────────────────────────────────────
 
-/**
+  /**
 
-- Re-puts all localStorage entries with a fresh TTL.
-- Includes the trigger ID and last-refresh timestamp in the batch.
-- 
-- @param {boolean} [debounce=false] - If true, skips the refresh if one
-- occurred within the last DEBOUNCE_WINDOW seconds.
-- @returns {boolean} true if a refresh ran, false if debounced or nothing stored.
-  */
+  - Re-puts all localStorage entries with a fresh TTL.
+  - Includes the trigger ID and last-refresh timestamp in the batch.
+  - 
+  - @param {boolean} [debounce=false] - If true, skips the refresh if one
+  - occurred within the last DEBOUNCE_WINDOW seconds.
+  - @returns {boolean} true if a refresh ran, false if debounced or nothing stored.
+    */
   const _refresh = (debounce = false) => {
-  const cache    = getCache();
-  const indexKey = `${LOCAL_PREFIX}__index__`;
+    const cache = getCache();
+    const indexKey = `${LOCAL_PREFIX}__index__`;
 
-
-if (debounce) {
-  const lastRefresh = cache.get(LAST_REFRESH_KEY);
-  if (lastRefresh) {
-    const elapsed = (Date.now() / 1000) - Number(lastRefresh);
-    if (elapsed < DEBOUNCE_WINDOW) return false;
-  }
-}
-
-const raw = cache.get(indexKey);
-if (!raw) return false;
-
-const index        = JSON.parse(raw);
-const prefixedKeys = index.map(k => `${LOCAL_PREFIX}${k}`);
-const values       = cache.getAll(prefixedKeys);
-
-const batch = { [indexKey]: raw };
-prefixedKeys.forEach(pk => { if (values[pk] != null) batch[pk] = values[pk]; });
-
-const triggerId = cache.get(TRIGGER_ID_KEY);
-if (triggerId) batch[TRIGGER_ID_KEY] = triggerId;
-batch[LAST_REFRESH_KEY] = String(Math.floor(Date.now() / 1000));
-
-cache.putAll(batch, TTL);
-return true;
-
-
-};
-
-// ─── Core factory ──────────────────────────────────────────────────────────
-
-/**
-
-- @param {string}    keyPrefix  - Namespace prefix for all cache keys.
-- @param {number}    [ttl]      - TTL in seconds (default 21600).
-- @param {function}  [onGet]    - Optional callback invoked after getItem.
-- Receives the key and resolved value. Used to trigger debounced refresh
-- on localStorage reads without blocking the return value.
-  */
-  const createStorage = (keyPrefix, ttl = TTL, onGet = null) => {
-  const INDEX_KEY = `${keyPrefix}__index__`;
-  const prefixed  = key => `${keyPrefix}${key}`;
-
-
-const getIndex = () => {
-  const raw = getCache().get(INDEX_KEY);
-  return raw ? JSON.parse(raw) : [];
-};
-
-const saveIndex = keys => safePut(INDEX_KEY, JSON.stringify(keys), ttl);
-
-const withLock = fn => {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(5000);
-  try {
-    return fn();
-  } finally {
-    lock.releaseLock();
-  }
-};
-
-const safePut = (cacheKey, value, expiresIn) => {
-  try {
-    getCache().put(cacheKey, value, expiresIn);
-  } catch (e) {
-    throw new Error(
-      `StoragePolyfill: Failed to cache key "${cacheKey}". ` +
-      `Value may exceed the 100KB CacheService limit. ` +
-      `Original error: ${e.message}`
-    );
-  }
-};
-
-return {
-
-  get length() {
-    return getIndex().length;
-  },
-
-  key(n) {
-    const index = getIndex();
-    return (n >= 0 && n < index.length) ? index[n] : null;
-  },
-
-  getItem(key) {
-    const value = getCache().get(prefixed(key));
-    const result = value !== null ? value : null;
-    onGet?.(key, result);
-    return result;
-  },
-
-  setItem(key, value) {
-    safePut(prefixed(key), String(value), ttl);
-
-    if (!getIndex().includes(key)) {
-      withLock(() => {
-        const freshIndex = getIndex();
-        if (!freshIndex.includes(key)) {
-          freshIndex.push(key);
-          saveIndex(freshIndex);
-        }
-      });
+    if (debounce) {
+      const lastRefresh = cache.get(LAST_REFRESH_KEY);
+      if (lastRefresh) {
+        const elapsed = (Date.now() / 1000) - Number(lastRefresh);
+        if (elapsed < DEBOUNCE_WINDOW) return false;
+      }
     }
-  },
 
-  removeItem(key) {
-    if (!getIndex().includes(key)) return;
-    getCache().remove(prefixed(key));
-    withLock(() => saveIndex(getIndex().filter(k => k !== key)));
-  },
+    const raw = cache.get(indexKey);
+    if (!raw) return false;
 
-  clear() {
-    withLock(() => {
-      const index = getIndex();
-      if (index.length > 0) getCache().removeAll(index.map(prefixed));
-      getCache().remove(INDEX_KEY);
+    const index = JSON.parse(raw);
+    const prefixedKeys = index.map(k => `${LOCAL_PREFIX}${k}`);
+    const values = cache.getAll(prefixedKeys);
+
+    const batch = {
+      [indexKey]: raw
+    };
+    prefixedKeys.forEach(pk => {
+      if (values[pk] != null) batch[pk] = values[pk];
     });
-  },
 
-  entries() {
-    const index = getIndex();
-    if (index.length === 0) return [];
-    const prefixedKeys = index.map(prefixed);
-    const values = getCache().getAll(prefixedKeys);
-    return index.map(k => [k, values[prefixed(k)] ?? null]);
-  },
+    const triggerId = cache.get(TRIGGER_ID_KEY);
+    if (triggerId) batch[TRIGGER_ID_KEY] = triggerId;
+    batch[LAST_REFRESH_KEY] = String(Math.floor(Date.now() / 1000));
 
-  _indexKey: INDEX_KEY,
-  _prefix: keyPrefix,
-  _ttl: ttl,
-};
+    cache.putAll(batch, TTL);
+    return true;
 
+  };
 
-};
+  // ─── Core factory ──────────────────────────────────────────────────────────
 
-// ─── Trigger lifecycle ─────────────────────────────────────────────────────
+  /**
 
-const installLocalStorageTrigger = () => {
-const cache    = getCache();
-const storedId = cache.get(TRIGGER_ID_KEY);
+  - @param {string}    keyPrefix  - Namespace prefix for all cache keys.
+  - @param {number}    [ttl]      - TTL in seconds (default 21600).
+  - @param {function}  [onGet]    - Optional callback invoked after getItem.
+  - Receives the key and resolved value. Used to trigger debounced refresh
+  - on localStorage reads without blocking the return value.
+    */
+  const createStorage = (keyPrefix, ttl = TTL, onGet = null) => {
+    const INDEX_KEY = `${keyPrefix}__index__`;
+    const prefixed = key => `${keyPrefix}${key}`;
 
+    const getIndex = () => {
+      const raw = getCache().get(INDEX_KEY);
+      return raw ? JSON.parse(raw) : [];
+    };
 
-if (storedId) {
-  const stillExists = ScriptApp.getProjectTriggers()
-    .some(t => t.getUniqueId() === storedId);
+    const saveIndex = keys => safePut(INDEX_KEY, JSON.stringify(keys), ttl);
 
-  if (stillExists) {
-    Logger.log(`StoragePolyfill: localStorage trigger already installed (${storedId})`);
-    return null;
-  }
-}
+    const withLock = fn => {
+      const lock = LockService.getScriptLock();
+      lock.waitLock(5000);
+      try {
+        return fn();
+      } finally {
+        lock.releaseLock();
+      }
+    };
 
-const trigger = ScriptApp
-  .newTrigger(REFRESH_FN)
-  .timeBased()
-  .everyHours(5)
-  .create();
+    const safePut = (cacheKey, value, expiresIn) => {
+      try {
+        getCache().put(cacheKey, value, expiresIn);
+      } catch (e) {
+        throw new Error(
+          `StoragePolyfill: Failed to cache key "${cacheKey}". ` +
+          `Value may exceed the 100KB CacheService limit. ` +
+          `Original error: ${e.message}`
+        );
+      }
+    };
 
-const id = trigger.getUniqueId();
-cache.put(TRIGGER_ID_KEY, id, TTL);
-Logger.log(`StoragePolyfill: localStorage trigger installed (${id})`);
-return id;
+    return {
 
+      get length() {
+        return getIndex().length;
+      },
 
-};
+      key(n) {
+        const index = getIndex();
+        return (n >= 0 && n < index.length) ? index[n] : null;
+      },
 
-const uninstallLocalStorageTrigger = () => {
-const cache    = getCache();
-const storedId = cache.get(TRIGGER_ID_KEY);
-if (!storedId) return;
+      getItem(key) {
+        const value = getCache().get(prefixed(key));
+        const result = value !== null ? value : null;
+        onGet?.(key, result);
+        return result;
+      },
 
+      setItem(key, value) {
+        safePut(prefixed(key), String(value), ttl);
 
-ScriptApp.getProjectTriggers()
-  .filter(t => t.getUniqueId() === storedId)
-  .forEach(t => ScriptApp.deleteTrigger(t));
+        if (!getIndex().includes(key)) {
+          withLock(() => {
+            const freshIndex = getIndex();
+            if (!freshIndex.includes(key)) {
+              freshIndex.push(key);
+              saveIndex(freshIndex);
+            }
+          });
+        }
+      },
 
-cache.remove(TRIGGER_ID_KEY);
-Logger.log('StoragePolyfill: localStorage trigger removed.');
+      removeItem(key) {
+        if (!getIndex().includes(key)) return;
+        getCache().remove(prefixed(key));
+        withLock(() => saveIndex(getIndex().filter(k => k !== key)));
+      },
 
+      clear() {
+        withLock(() => {
+          const index = getIndex();
+          if (index.length > 0) getCache().removeAll(index.map(prefixed));
+          getCache().remove(INDEX_KEY);
+        });
+      },
 
-};
+      entries() {
+        const index = getIndex();
+        if (index.length === 0) return [];
+        const prefixedKeys = index.map(prefixed);
+        const values = getCache().getAll(prefixedKeys);
+        return index.map(k => [k, values[prefixed(k)] ?? null]);
+      },
 
-// Register the trigger target at the top level so Apps Script can resolve
-// it by name when used as a library, without requiring the consuming project
-// to define a wrapper.
-globalThis[REFRESH_FN] = () => _refresh(false);
+      _indexKey: INDEX_KEY,
+      _prefix: keyPrefix,
+      _ttl: ttl,
+    };
 
-// ─── Public API ────────────────────────────────────────────────────────────
+  };
 
-return {
-sessionStorage: createStorage(SESSION_PREFIX),
+  // ─── Trigger lifecycle ─────────────────────────────────────────────────────
 
+  const installLocalStorageTrigger = () => {
+    const cache = getCache();
+    const storedId = cache.get(TRIGGER_ID_KEY);
 
-// localStorage passes a debounced refresh as the onGet callback so that
-// any read will opportunistically keep the cache alive.
-localStorage: createStorage(LOCAL_PREFIX, TTL, () => _refresh(true)),
+    if (storedId) {
+      const stillExists = ScriptApp.getProjectTriggers()
+        .some(t => t.getUniqueId() === storedId);
 
-installLocalStorageTrigger,
-uninstallLocalStorageTrigger,
-refreshLocalStorageCache: () => _refresh(false),
+      if (stillExists) {
+        Logger.log(`StoragePolyfill: localStorage trigger already installed (${storedId})`);
+        return null;
+      }
+    }
 
+    const trigger = ScriptApp
+      .newTrigger(REFRESH_FN)
+      .timeBased()
+      .everyHours(5)
+      .create();
 
-};
+    const id = trigger.getUniqueId();
+    cache.put(TRIGGER_ID_KEY, id, TTL);
+    Logger.log(`StoragePolyfill: localStorage trigger installed (${id})`);
+    return id;
+
+  };
+
+  const uninstallLocalStorageTrigger = () => {
+    const cache = getCache();
+    const storedId = cache.get(TRIGGER_ID_KEY);
+    if (!storedId) return;
+
+    ScriptApp.getProjectTriggers()
+      .filter(t => t.getUniqueId() === storedId)
+      .forEach(t => ScriptApp.deleteTrigger(t));
+
+    cache.remove(TRIGGER_ID_KEY);
+    Logger.log('StoragePolyfill: localStorage trigger removed.');
+
+  };
+
+  // Register the trigger target at the top level so Apps Script can resolve
+  // it by name when used as a library, without requiring the consuming project
+  // to define a wrapper.
+  globalThis[REFRESH_FN] = () => _refresh(false);
+
+  // ─── Public API ────────────────────────────────────────────────────────────
+
+  return {
+    sessionStorage: createStorage(SESSION_PREFIX),
+
+    // localStorage passes a debounced refresh as the onGet callback so that
+    // any read will opportunistically keep the cache alive.
+    localStorage: createStorage(LOCAL_PREFIX, TTL, () => _refresh(true)),
+
+    installLocalStorageTrigger,
+    uninstallLocalStorageTrigger,
+    refreshLocalStorageCache: () => _refresh(false),
+
+  };
 
 })();
